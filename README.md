@@ -74,3 +74,7 @@ cargo build --release
 | `serde` + `serde_json` | JSON serialization |
 
 Nothing else.
+
+## See also
+
+- [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) — alternative implementation in Python
