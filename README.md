@@ -45,6 +45,18 @@ assistant: { role: "assistant", content: "final answer" }
 
 The model decides when to run tools and when to stop. You just provide the goal.
 
+## Installation
+
+```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Clone the repository
+git clone https://github.com/Engineering4AI/nano-code
+cd nano-code
+```
+
 ## Setup
 
 ```bash
@@ -80,3 +92,16 @@ Nothing else.
 ## See also
 
 - [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) — alternative implementation in Python
+
+## Citation
+
+If you use nano-code in your research, please cite:
+
+```bibtex
+@software{nano_code2026,
+  title  = {nano-code: The Smallest Possible Coding Agent in Rust},
+  author = {{Engineering4AI}},
+  year   = {2026},
+  url    = {https://github.com/Engineering4AI/nano-code}
+}
+```
