@@ -1,0 +1,5 @@
+.omc
+.env
+
+target/
+history.json
