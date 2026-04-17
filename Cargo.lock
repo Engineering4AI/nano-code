@@ -602,7 +602,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nano-rust"
+name = "nano-code"
 version = "0.1.0"
 dependencies = [
  "reqwest",
