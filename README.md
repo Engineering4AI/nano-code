@@ -3,7 +3,7 @@
 <div align="center">
 
 **The smallest practical coding agent in Rust**  
-Single binary • ~185 LOC • blocking HTTP • no framework ceremony
+Single binary • blocking HTTP • no framework ceremony
 
 <img width="1200" height="800" alt="nano-code" src="https://github.com/user-attachments/assets/51063025-c8c5-444a-8595-5442439675a1" />
 
@@ -24,13 +24,15 @@ Single binary • ~185 LOC • blocking HTTP • no framework ceremony
 
 ```mermaid
 flowchart TD
-    A[you] --> B[agent loop]
-    B --> C[LLM API]
+    A[you] --> B[user prompt becomes goal]
+    B --> C[agent loop]
     C --> D{tool_calls?}
     D -->|yes| E[shell / read_file / write_file]
-    E --> F[tool results]
-    F --> C
-    D -->|no - end_turn| G[print response]
+    E --> C
+    D -->|no - end_turn| F{GOAL_COMPLETE?}
+    F -->|yes| G[print response]
+    F -->|no| H[Ralph loop prompt]
+    H --> C
 ```
 
 ### Core runtime pieces
@@ -43,7 +45,9 @@ flowchart TD
 
 3. **`main()` agent loop**  
    - Outer loop: reads your prompt and appends a `user` message.
+   - Ralph loop: treats that prompt as the active goal.
    - Inner loop: calls model → executes tool calls → appends `tool` messages → repeats until end turn.
+   - Completion: an end turn only stops when the assistant replies with `GOAL_COMPLETE`.
 
 ---
 
@@ -54,6 +58,10 @@ The system prompt explicitly pushes the model to execute work:
 > "Never describe what you would do. Do it."  
 > "When asked to build something: create the files, run them, fix errors, confirm success."
 
+The harness also runs a Ralph loop around each user prompt. If the model ends a
+turn without marking the original goal complete, nano-code re-prompts it to
+continue working on that same goal.
+
 ---
 
 ## 📨 Message flow (OpenAI format)
@@ -62,10 +70,11 @@ The system prompt explicitly pushes the model to execute work:
 user:      { role: "user",      content: "your prompt" }
 assistant: { role: "assistant", tool_calls: [{id, function: {name, arguments}}] }
 tool:      { role: "tool",      tool_call_id: id, content: "cmd output" }
-assistant: { role: "assistant", content: "final answer" }
+assistant: { role: "assistant", content: "GOAL_COMPLETE final answer" }
 ```
 
-The model decides when to call tools and when to stop.
+The model decides when to call tools. The harness decides when to stop by
+requiring the `GOAL_COMPLETE` marker for the original user prompt.
 
 ---
 

@@ -16,7 +16,10 @@ Rules:
 - When asked to build something: create the files, run them, fix errors, confirm success.
 - Be terse in text. Let tool output speak for itself.
 - Never say 'here is the code' and paste it. Write it to disk and run it.
-- You are done when the task works, not when you have described it.";
+- You are done when the task works, not when you have described it.
+- Treat each user prompt as the active goal. Only end with GOAL_COMPLETE when that goal is materialized.";
+
+const GOAL_COMPLETE: &str = "GOAL_COMPLETE";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Msg {
@@ -30,10 +33,14 @@ struct Msg {
 }
 
 fn load_env() {
-    let Ok(text) = fs::read_to_string(".env") else { return };
+    let Ok(text) = fs::read_to_string(".env") else {
+        return;
+    };
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if let Some((k, v)) = line.split_once('=') {
             std::env::set_var(k.trim(), v.trim());
         }
@@ -46,7 +53,11 @@ fn shell(cmd: &str) -> String {
             let out = String::from_utf8_lossy(&o.stdout);
             let err = String::from_utf8_lossy(&o.stderr);
             if o.status.success() {
-                if out.trim().is_empty() { "(no output)".into() } else { out.trim().to_string() }
+                if out.trim().is_empty() {
+                    "(no output)".into()
+                } else {
+                    out.trim().to_string()
+                }
             } else {
                 format!("ERROR:\n{}{}", err.trim(), out.trim())
             }
@@ -73,8 +84,8 @@ fn write_file(path: &str, content: &str) -> String {
 
 fn dispatch(name: &str, args: &Value) -> String {
     match name {
-        "shell"      => shell(args["command"].as_str().unwrap_or("")),
-        "read_file"  => read_file(args["path"].as_str().unwrap_or("")),
+        "shell" => shell(args["command"].as_str().unwrap_or("")),
+        "read_file" => read_file(args["path"].as_str().unwrap_or("")),
         "write_file" => write_file(
             args["path"].as_str().unwrap_or(""),
             args["content"].as_str().unwrap_or(""),
@@ -149,15 +160,114 @@ fn call_api(client: &Client, url: &str, key: &str, model: &str, messages: &[Msg]
         .expect("parse failed")
 }
 
+fn push_user(messages: &mut Vec<Msg>, content: String) {
+    messages.push(Msg {
+        role: "user".into(),
+        content: Some(json!(content)),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+}
+
+fn run_agent_loop(
+    client: &Client,
+    api_url: &str,
+    key: &str,
+    model: &str,
+    messages: &mut Vec<Msg>,
+) -> String {
+    loop {
+        let resp = call_api(client, api_url, key, model, messages);
+
+        let finish = resp["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let msg = &resp["choices"][0]["message"];
+
+        if finish == "tool_calls" {
+            let tool_calls = msg["tool_calls"].clone();
+
+            // Push assistant message
+            messages.push(Msg {
+                role: "assistant".into(),
+                content: msg["content"].as_str().map(|s| json!(s)),
+                tool_calls: Some(tool_calls.clone()),
+                tool_call_id: None,
+            });
+
+            // Execute each tool and push result
+            for tc in tool_calls.as_array().unwrap_or(&vec![]) {
+                let id = tc["id"].as_str().unwrap_or("").to_string();
+                let name = tc["function"]["name"].as_str().unwrap_or("");
+                let args: Value =
+                    serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
+                        .unwrap_or(json!({}));
+
+                eprintln!(
+                    "\x1b[2m  [{name}] {}\x1b[0m",
+                    tc["function"]["arguments"].as_str().unwrap_or("")
+                );
+
+                let result = dispatch(name, &args);
+                eprintln!(
+                    "\x1b[2m  => {}\x1b[0m\n",
+                    result.lines().next().unwrap_or("")
+                );
+
+                messages.push(Msg {
+                    role: "tool".into(),
+                    content: Some(json!(result)),
+                    tool_calls: None,
+                    tool_call_id: Some(id),
+                });
+            }
+        } else {
+            // end_turn or other — push assistant message and let the Ralph loop decide if done
+            let content = msg["content"].as_str().unwrap_or("").to_string();
+            messages.push(Msg {
+                role: "assistant".into(),
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(json!(content.clone()))
+                },
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            return content;
+        }
+    }
+}
+
+fn goal_is_complete(text: &str) -> bool {
+    text.trim_start().starts_with(GOAL_COMPLETE)
+}
+
+fn final_text(text: &str) -> &str {
+    text.trim_start()
+        .strip_prefix(GOAL_COMPLETE)
+        .unwrap_or(text)
+        .trim_start_matches(|c: char| c == ':' || c == '-' || c.is_whitespace())
+}
+
+fn ralph_prompt(goal: &str) -> String {
+    format!(
+        "Ralph loop check. Original user goal:\n{goal}\n\n\
+        If the goal is fully materialized in the workspace, reply with {GOAL_COMPLETE} \
+        followed by a terse summary. If it is not fully materialized, keep working now \
+        by using tools. Do not stop just because the previous turn ended."
+    )
+}
+
 fn main() {
     load_env();
 
-    let key = std::env::var("OPENROUTER_API_KEY")
-        .expect("OPENROUTER_API_KEY not set");
+    let key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY not set");
     let base_url = std::env::var("INFERENCE_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-    let model = std::env::var("MODEL_NAME")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4-6".to_string());
+    let model =
+        std::env::var("MODEL_NAME").unwrap_or_else(|_| "anthropic/claude-sonnet-4-6".to_string());
     let api_url = format!("{base_url}/chat/completions");
 
     let client = Client::new();
@@ -170,73 +280,30 @@ fn main() {
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() { break; }
+        if io::stdin().read_line(&mut input).is_err() {
+            break;
+        }
         let input = input.trim().to_string();
-        if input.is_empty() { break; }
+        if input.is_empty() {
+            break;
+        }
 
-        messages.push(Msg {
-            role: "user".into(),
-            content: Some(json!(input)),
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        let goal = input.clone();
+        push_user(&mut messages, input);
 
-        // Agent loop
+        // Ralph loop: end_turn is not completion; GOAL_COMPLETE is completion.
         loop {
-            let resp = call_api(&client, &api_url, &key, &model, &messages);
-
-            let finish = resp["choices"][0]["finish_reason"].as_str().unwrap_or("").to_string();
-            let msg = &resp["choices"][0]["message"];
-
-            // Print any text content
-            if let Some(text) = msg["content"].as_str() {
-                if !text.trim().is_empty() {
+            let text = run_agent_loop(&client, &api_url, &key, &model, &mut messages);
+            if goal_is_complete(&text) {
+                let text = final_text(&text);
+                if !text.is_empty() {
                     println!("\n{text}\n");
                 }
-            }
-
-            if finish == "tool_calls" {
-                let tool_calls = msg["tool_calls"].clone();
-
-                // Push assistant message
-                messages.push(Msg {
-                    role: "assistant".into(),
-                    content: msg["content"].as_str().map(|s| json!(s)),
-                    tool_calls: Some(tool_calls.clone()),
-                    tool_call_id: None,
-                });
-
-                // Execute each tool and push result
-                for tc in tool_calls.as_array().unwrap_or(&vec![]) {
-                    let id = tc["id"].as_str().unwrap_or("").to_string();
-                    let name = tc["function"]["name"].as_str().unwrap_or("");
-                    let args: Value = serde_json::from_str(
-                        tc["function"]["arguments"].as_str().unwrap_or("{}")
-                    ).unwrap_or(json!({}));
-
-                    eprintln!("\x1b[2m  [{name}] {}\x1b[0m",
-                        tc["function"]["arguments"].as_str().unwrap_or(""));
-
-                    let result = dispatch(name, &args);
-                    eprintln!("\x1b[2m  => {}\x1b[0m\n", result.lines().next().unwrap_or(""));
-
-                    messages.push(Msg {
-                        role: "tool".into(),
-                        content: Some(json!(result)),
-                        tool_calls: None,
-                        tool_call_id: Some(id),
-                    });
-                }
-            } else {
-                // end_turn or other — push assistant message and break
-                messages.push(Msg {
-                    role: "assistant".into(),
-                    content: msg["content"].as_str().map(|s| json!(s)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
                 break;
             }
+
+            eprintln!("\x1b[2m  [ralph] goal not marked complete; continuing\x1b[0m\n");
+            push_user(&mut messages, ralph_prompt(&goal));
         }
     }
 }
